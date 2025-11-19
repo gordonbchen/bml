@@ -14,9 +14,7 @@ This paper addresses the high computational cost of diffusion modelling. This is
 * Observed and unobserved random variables?
 * What is the goal of the project?
 
-We aim to develop a generative model that can learn a probability distribution, 
-$$P(x),$$
-over images $x\in D$, where $x$ is an image in our data set $D$, to generate images similar to what's in $D$. For this project specifically, we plan to use the MNIST dataset, where each image lies in a high dimension pixel space $\mathbb{R}^{28\times28}$. Diffusion models can generate images, but they operate on pixel values. Each image in MNIST has 784 pixels, and running a diffusion in the pixel space is inefficient because each diffusion step has to process all 784 dimensions. The main question we are trying to address is how we can model $P(x)$ efficiently by avoiding the high computational cost of performing diffusion directly in the pixel space?
+We aim to develop a generative model that can learn a probability distribution $P(x)$ over images $x\in D$, where $x$ is an image in our data set $D$, to generate images similar to what's in $D$. For this project specifically, we plan to use the MNIST dataset, where each image lies in a high dimension pixel space $\mathbb{R}^{28\times28}$. Diffusion models can generate images, but they operate on pixel values. Each image in MNIST has 784 pixels, and running a diffusion in the pixel space is inefficient because each diffusion step has to process all 784 dimensions. The main question we are trying to address is how we can model $P(x)$ efficiently by avoiding the high computational cost of performing diffusion directly in the pixel space?
 
 To address this, we introduce a latent variable model in which we learn a lower dimensional representation (through a variational autoencoder (VAE)) of a smaller latent vector, $z_0$ of images and perform diffusion in this latent space. After the reverse diffusion process, $z_0$ is decoded back to the pixel domain to produce a generated image $\hat{x}$.
 
@@ -29,42 +27,36 @@ To address this, we introduce a latent variable model in which we learn a lower 
 * $z_t$ for $t\in\{1,2,..,T\} \Rightarrow$ The latent representation of the image after $t$ steps of the forward diffusion process, where $T$ is the total number of diffusion steps.
 * $\epsilon \sim N(0,I) \Rightarrow$ Noise injected during the forward and reverse diffusion process.
 
-To reduce the cost of running the diffusion process in the pixel space, we first map each image $x\in D$ to a lower dimensional latent vector $z_0$ using a VAE,
-$$z_0 \sim q_\phi(z_0 | x).$$
+To reduce the cost of running the diffusion process in the pixel space, we first map each image $x\in D$ to a lower dimensional latent vector $z_0$ using a VAE
+
+$$ z_0 \sim q_\phi(z_0 | x) $$
 
 In the latent space, we define a forward diffusion process that adds noise gradually,
-$$
-q(z_t \mid z_{t-1}) = N\left(\sqrt{1-\beta_t}\, z_{t-1},\; \beta_t I\right),
-\qquad t = 1,\dots,T.
-$$
+
+$$ q(z_t \mid z_{t-1}) = N\left(\sqrt{1-\beta_t}\, z_{t-1},\; \beta_t I\right), \qquad t = 1,\dots,T $$
 
 Using the reparameterization trick, we can obtain a closed form for the forward process,
 
-$$
-z_t = \sqrt{\bar{\alpha}_t}\, z_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon, \qquad \epsilon \sim N(0,I),
-$$
+$$ z_t = \sqrt{\bar{\alpha}_t}\, z_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon, \qquad \epsilon \sim N(0,I) $$
 
 where,
 
-$$
-\bar{\alpha}_t = \prod_{i=1}^t (1 - \beta_i),
-$$
+$$ \bar{\alpha}_t = \prod_{i=1}^t (1 - \beta_i) $$
 
 so that,
 
-$$
-q(z_t \mid z_0) = N\!\left(\sqrt{\bar{\alpha}_t}\, z_0,\; (1 - \bar{\alpha}_t) I \right).
-$$
+$$ q(z_t \mid z_0) = N\left(\sqrt{\bar{\alpha}_t} z_0, (1 - \bar{\alpha}_t) I \right) $$
 
-During training, the diffusion model learns to predict the noise added to $z_0$. We denote the noise prediction by,
-$ \epsilon_\theta(z_t,t).$
+During training, the diffusion model learns to predict the noise added to $z_0$. We denote the noise prediction by
+
+$$ \epsilon_\theta(z_t,t) $$
 
 The decoder maps the final denoised latent $z_0$ back to pixel space,
-$$
-\hat{x} \sim p_\psi(x | z_0).
-$$
+
+$$ \hat{x} \sim p_\psi(x | z_0) $$
 
 The full generative process of our latent diffusion model is,
+
 $$
 z_T \sim N(0,I) \to 
 z_{T-1} \to
@@ -74,6 +66,7 @@ z_0 \to
 $$
 
 To train the latent diffusion model, we want to minimize over an objective loss function. The total objective is,
+
 $$
 L = \mathbb{E}_{z_0 \sim q(z_0\mid x),\ \epsilon \sim N(0,I),\ t \sim \mathrm{Unif}\{1,\dots,T\}}
 \left[ \ \|\, \epsilon - \epsilon_\theta(z_t, t)\, \|^2 \ \right]
@@ -98,7 +91,9 @@ The Latent Diffusion Model is made up of 2 parts: an autoencoder for perceptual 
 The authors tested 2 autoencoders, a VAE (Variational Auto Encoder) and VQ-GAN (Vector-Quantized Generative Adversarial Network). Keep in mind that the purpose of the autoencoder is to compress images into a smaller latent space so diffusion can run more efficiently, while losing as little image fidelity as possible. Both autoencoders are trained first (via SGD), separately from diffusion model and fixed during diffusion model training.
 
 #### VAE
-VAEs have 2 parts: an encoder that probabilistically compresses inputs into latent factors (or codes), and a decoder that reconstructs the sampled latent codes back into image space. Classic VAEs minimize the following objective: $$L = -\mathbb{E}_{z \sim q_\phi(z | x)} \log p_\theta(x | z) + \text{KL} \left[ q_\phi(z | x) || p(z) \right]$$
+VAEs have 2 parts: an encoder that probabilistically compresses inputs into latent factors (or codes), and a decoder that reconstructs the sampled latent codes back into image space. Classic VAEs minimize the following objective:
+
+$$L = -\mathbb{E}_{z \sim q_\phi(z | x)} \log p_\theta(x | z) + \text{KL} \left[ q_\phi(z | x) || p(z) \right]$$
 
 The first term $L_{recon} = -\mathbb{E}_{z \sim q_\phi(z | x)} \log p_\theta(x | z)$ is the reconstruction loss (how likely is the image $x$ that was reconstructed from the sampled latent code $z$?), which encourages the VAE to output realistic images.
 
@@ -110,7 +105,9 @@ $ \cdot \text{ reconstruct (decode) latents into images: } x \sim p_\theta(x | z
 
 ![vae graphical model](images/vae_graphical_model.png)
 
-The authors use a modified VAE with $$L_{recon} = \lambda_{L1} ||x - \mu_\theta(z)||_1 + \lambda_{per} \text{LPIPS}(x, \mu_\theta(z)) + \lambda_{adv} L_{adv}$$
+The authors use a modified VAE with
+
+$$L_{recon} = \lambda_{L1} ||x - \mu_\theta(z)||_1 + \lambda_{per} \text{LPIPS}(x, \mu_\theta(z)) + \lambda_{adv} L_{adv}$$
 
 The first term $\lambda_{L1} ||x - \mu_\theta(z)||_1$ is just the L1 loss between the image $x$ and the reconstructed image $\mu_\theta(z)$. The authors chose to use an L1 instead of L2 loss because they found that using an L1 loss made images less blurry (L2 is minimized by the mean value, which for images, is gray and blurry, while L1 is minimized by the median value).
 
