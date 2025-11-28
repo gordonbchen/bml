@@ -201,7 +201,7 @@ if __name__ == "__main__":
     images = get_mnist()
 
     model = UNet(images.shape[1], config.conv_channels, config.max_diffusion_steps, config.time_emb_dim, config.group_size)
-    print(summary(model, input_data=(images[:config.batch_size], torch.arange(config.batch_size))))
+    print(summary(model, input_data=(images[:config.batch_size], torch.arange(config.batch_size)), depth=1))
     optim = Adam(model.parameters(), lr=config.lr)
 
     model.to("cuda")
