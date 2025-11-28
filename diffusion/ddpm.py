@@ -194,6 +194,8 @@ class Config(CLIParams):
     batch_size: int = 64
     n_steps: int = 5_001
 
+    name: str = ""
+
 
 if __name__ == "__main__":
     config = Config()
@@ -207,7 +209,7 @@ if __name__ == "__main__":
     model.to("cuda")
     images = images.to("cuda")
 
-    run = wandb.init(project="ddpm", config=asdict(config))
+    run = wandb.init(project="ddpm", config=asdict(config), name=(None if config.name == "" else config.name))
     for step in range(config.n_steps):
         xb = images[torch.randint(len(images), (config.batch_size,), device="cuda")]
 
