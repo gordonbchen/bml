@@ -182,6 +182,13 @@ class CLIParams:
         for k, v in vars(args).items():
             setattr(self, k, v)
 
+    def to_cli_args(self) -> list[str]:
+        """Convert to params to CLI args."""
+        args = []
+        for k, v in asdict(self).items():
+            args.append(f"--{k}={v}")
+        return args
+
 
 @dataclass
 class Config(CLIParams):
