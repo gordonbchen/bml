@@ -16,6 +16,9 @@ import matplotlib.pyplot as plt
 import wandb
 
 
+torch.set_float32_matmul_precision("high")
+
+
 def get_mnist() -> torch.Tensor:
     ds = MNIST(root="data", train=True, download=True)
     images = ds.data.to(dtype=torch.float32)
@@ -220,7 +223,7 @@ if __name__ == "__main__":
     print(summary(model, input_data=(images[:config.batch_size], torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
     optim = Adam(model.parameters(), lr=config.lr)
 
-    model.to("cuda")
+    model.to("cuda").compile()
     images = images.to("cuda")
 
     run = wandb.init(project="ddpm", config=asdict(config), name=(None if config.name == "" else config.name))
@@ -238,7 +241,7 @@ if __name__ == "__main__":
         optim.step()
 
         if (step % 500) == 0:
-            print(f"{str(step):<5}: {loss.item():.3f}")
+            print(f"{str(step):<5}: {loss.item()}")
             run.log({"loss": loss.item()}, step=step)
             
             if (step % 1000) == 0:
