@@ -25,7 +25,7 @@ def get_mnist() -> torch.Tensor:
     return images
 
 
-def calc_cos_schedule(t: torch.Tensor, T: int, s: float = 0.1) -> torch.Tensor:
+def calc_cos_schedule(t: torch.Tensor, T: int, s: float = 0.008) -> torch.Tensor:
     phase = ((t / T) + s) / (1 + s)
     return torch.cos(phase * (torch.pi / 2.0)) ** 2.0
 
@@ -203,7 +203,7 @@ class Config(CLIParams):
     cycle_frac: float = 0.25
 
     # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
-    lr: float = 1e-3
+    lr: float = 3e-4
 
     batch_size: int = 128
     n_steps: int = 16_001
