@@ -199,7 +199,7 @@ class Config(CLIParams):
     conv_dim: int = 32
     time_dim: int = 32
     groups: int = 4
-    max_time: int = 512
+    max_time: int = 128
     cycle_frac: float = 0.25
 
     # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
@@ -217,7 +217,7 @@ if __name__ == "__main__":
     images = get_mnist()
 
     model = UNet(images.shape[1], config.conv_dim, config.max_time, config.time_dim, config.groups, config.cycle_frac)
-    print(summary(model, input_data=(images[:config.batch_size], torch.arange(config.batch_size)), depth=1))
+    print(summary(model, input_data=(images[:config.batch_size], torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
     optim = Adam(model.parameters(), lr=config.lr)
 
     model.to("cuda")
