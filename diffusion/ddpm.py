@@ -1,3 +1,4 @@
+from copy import deepcopy
 from argparse import ArgumentParser
 from dataclasses import dataclass, asdict
 
@@ -215,7 +216,6 @@ class UNet(nn.Module):
 
 @torch.no_grad()
 def sample_diffusion(model: nn.Module, noise_schedule: NoiseSchedule, batch_size: int, image_shape: tuple[int, int, int]) -> torch.Tensor:
-    model.eval()
     batched_shape = (batch_size, *image_shape)
     device = next(model.parameters()).device
     x = torch.randn(batched_shape, dtype=torch.float32, device=device)
@@ -228,8 +228,23 @@ def sample_diffusion(model: nn.Module, noise_schedule: NoiseSchedule, batch_size
         if t > 1:
             noise = torch.randn(batched_shape, dtype=torch.float32, device=device) * noise_schedule.beta[t].sqrt()
             x = x + noise
-    model.train()
     return x
+
+
+class EMAModel:
+    def __init__(self, model: nn.Module, decay: float):
+        self.model = deepcopy(model)
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        self.decay = decay
+
+    @torch.no_grad()
+    def update(self, model: nn.Module, step: int):
+        decay = min(self.decay, 1 - (1 / (step + 1)))
+        msd = model.state_dict()
+        for k, v in self.model.state_dict().items():
+            v.mul_(decay).add_(msd[k], alpha=1 - decay)
 
 
 class CLIParams:
@@ -259,6 +274,7 @@ class Config(CLIParams):
     down_blocks: int = 3
     groups: int = 4
     cycle_frac: float = 0.25
+    ema_decay: float = 0.999
 
     max_time: int = 128
     noise_schedule: str = "cos"
@@ -282,7 +298,8 @@ if __name__ == "__main__":
     model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
     print(summary(model, input_data=(dataset[0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
 
-    model.to("cuda").compile()
+    model.to("cuda").train().compile()
+    ema_model = EMAModel(model, decay=config.ema_decay)
     optim = Adam(model.parameters(), lr=config.lr)
 
     noise_schedule = NOISE_SCHEDULES[config.noise_schedule](max_time=config.max_time)
@@ -302,12 +319,14 @@ if __name__ == "__main__":
         loss.backward()
         optim.step()
 
+        ema_model.update(model, step)
+
         if (step % 500) == 0:
             print(f"{str(step):<5}: {loss.item()}")
             run.log({"loss": loss.item()}, step=step)
             
             if (step % 1000) == 0:
-                samples = sample_diffusion(model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
+                samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
 
                 counts, bins = samples.histogram(bins=50)
                 plt.plot((bins[1:] + bins[:-1]) / 2, counts)
