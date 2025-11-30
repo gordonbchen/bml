@@ -285,6 +285,7 @@ class Config(CLIParams):
     lr: float = 3e-4  # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
     batch_size: int = 128
     n_steps: int = 16_001
+    log_steps: int = 1_000
 
     name: str = ""
 
@@ -321,18 +322,14 @@ if __name__ == "__main__":
 
         ema_model.update(model, step)
 
-        if (step % 500) == 0:
+        if (step % config.log_steps) == 0:
             print(f"{str(step):<5}: {loss.item()}")
-            run.log({"loss": loss.item()}, step=step)
-            
-            if (step % 1000) == 0:
-                samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
+            samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
 
-                counts, bins = samples.histogram(bins=50)
-                plt.plot((bins[1:] + bins[:-1]) / 2, counts)
+            counts, bins = samples.histogram(bins=50)
+            plt.plot((bins[1:] + bins[:-1]) / 2, counts)
 
-                samples = rearrange(samples , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
-                samples = ((samples.clip(-1, 1) + 1) * (255 / 2)).to(dtype=torch.uint8)
-                run.log({"samples": wandb.Image(samples), "sample_hist": plt}, step=step)
-
+            samples = rearrange(samples , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
+            samples = ((samples.clip(-1, 1) + 1) * (255 / 2)).to(dtype=torch.uint8)
+            run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_hist": plt}, step=step)
     run.finish()
