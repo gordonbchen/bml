@@ -276,7 +276,7 @@ class Config(CLIParams):
     cycle_frac: float = 0.25
     ema_decay: float = 0.999
 
-    max_time: int = 128
+    max_time: int = 1000
     noise_schedule: str = "cos"
 
     dataset: str = "mnist"
