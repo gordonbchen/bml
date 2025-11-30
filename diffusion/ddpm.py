@@ -6,11 +6,11 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from torchvision.datasets import MNIST
+from torchvision.datasets import MNIST, OxfordIIITPet
+from torchvision.transforms import v2
 
 from einops import rearrange
 from einops.layers.torch import Rearrange
-
 from torchinfo import summary
 
 import matplotlib.pyplot as plt
@@ -20,20 +20,29 @@ import wandb
 torch.set_float32_matmul_precision("high")
 
 
-class MNISTDataset(Dataset):
-    def __init__(self):
-        ds = MNIST(root="data", train=True, download=True)
-        images = ds.data.to(dtype=torch.float32)
-        images = (images / (255 / 2)) - 1
-        assert (images.min() == -1) and (images.max() == 1)
-        self.images = images.unsqueeze(1)
-
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return self.images[idx]
+class ImagesOnly:
+    def __init__(self, dataset: Dataset):
+        self.dataset = dataset
     
     def __len__(self) -> int:
-        return len(self.images)
+        return len(self.dataset)
     
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        img, _ = self.dataset[idx]
+        return img
+
+
+def get_dataset(name: str, image_size: int) -> Dataset:
+    DATASETS = {"mnist": (MNIST, {}), "pets": (OxfordIIITPet, {"target_types": "binary-category"})}
+    klass, kwargs = DATASETS[name]
+    transform = v2.Compose([
+        v2.ToImage(),
+        v2.Resize((image_size, image_size)),
+        v2.ToDtype(torch.float32, scale=True),
+        lambda x: (x * 2) - 1,  # [0, 1] to [-1, 1].
+    ])
+    return ImagesOnly(klass(root="data", transform=transform, download=True, **kwargs))
+
 
 def inf_dataloader(dataloader: DataLoader):
     while True:
@@ -80,7 +89,7 @@ class LinearNoiseSchedule(NoiseSchedule):
         self.register_buffer("alpha_bar", alpha_bar)
 
 
-NOISE_SCHEDULES = {
+NOISE_SCHEDULES: dict[str, type[NoiseSchedule]] = {
     "cos": CosNoiseSchedule,
     "linear": LinearNoiseSchedule,
 }
@@ -235,9 +244,10 @@ class Config(CLIParams):
     max_time: int = 128
     noise_schedule: str = "cos"
 
-    # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
-    lr: float = 3e-4
+    dataset: str = "mnist"
+    image_size: int = 32
 
+    lr: float = 3e-4  # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
     batch_size: int = 128
     n_steps: int = 16_001
 
@@ -247,7 +257,7 @@ class Config(CLIParams):
 if __name__ == "__main__":
     config = Config().cli_override()
 
-    dataset = MNISTDataset()
+    dataset = get_dataset(config.dataset, config.image_size)
     dataloader = inf_dataloader(DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True))
 
     model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.groups, config.cycle_frac)
