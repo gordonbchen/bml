@@ -173,6 +173,7 @@ class UNet(nn.Module):
             self.down_convs.append(ResBlock(in_dim, in_dim * 2, time_dim, groups, down=True))
             in_dim *= 2
 
+        # TODO: add attention.
         self.bottleneck = ResBlock(in_dim, in_dim * 2, time_dim, groups)
         in_dim *= 2
 
