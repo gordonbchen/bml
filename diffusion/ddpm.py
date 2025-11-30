@@ -206,11 +206,7 @@ def sample_diffusion(model: nn.Module, noise_schedule: NoiseSchedule, batch_size
 
 
 class CLIParams:
-    def __post_init__(self) -> None:
-        """Override params using cli args."""
-        self.cli_override()
-
-    def cli_override(self) -> None:
+    def cli_override(self):
         """Override params from CLI args."""
         parser = ArgumentParser()
         for k, v in asdict(self).items():
@@ -219,6 +215,7 @@ class CLIParams:
 
         for k, v in vars(args).items():
             setattr(self, k, v)
+        return self
 
     def to_cli_args(self) -> list[str]:
         """Convert to params to CLI args."""
@@ -248,7 +245,7 @@ class Config(CLIParams):
 
 
 if __name__ == "__main__":
-    config = Config()
+    config = Config().cli_override()
 
     dataset = MNISTDataset()
     dataloader = inf_dataloader(DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True))
