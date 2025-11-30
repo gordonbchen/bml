@@ -296,7 +296,7 @@ if __name__ == "__main__":
     dataloader = inf_dataloader(DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True))
 
     model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
-    print(summary(model, input_data=(dataset[0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
+    summary(model, input_data=(dataset[0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
 
     model.to("cuda").train().compile()
     ema_model = EMAModel(model, decay=config.ema_decay)
