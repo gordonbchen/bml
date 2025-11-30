@@ -163,18 +163,28 @@ class ResBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, img_dim: int, conv_dim: int, max_time: int, time_dim: int, groups: int, cycle_frac: float):
+    def __init__(self, img_dim: int, conv_dim: int, max_time: int, time_dim: int, down_convs: int, groups: int, cycle_frac: float):
         super().__init__()
-        self.down_conv1 = ResBlock(img_dim, conv_dim, time_dim, groups, down=True)
-        self.down_conv2 = ResBlock(conv_dim, conv_dim * 2, time_dim, groups, down=True)
+        self.init_conv = nn.Conv2d(img_dim, conv_dim, 3, padding=1)
 
-        self.bottleneck = ResBlock(conv_dim * 2, conv_dim * 4, time_dim, groups)
+        self.down_convs = nn.ModuleList()
+        in_dim = conv_dim
+        for _ in range(down_convs):
+            self.down_convs.append(ResBlock(in_dim, in_dim * 2, time_dim, groups, down=True))
+            in_dim *= 2
 
-        self.up_conv1 = ResBlock(conv_dim * 4, conv_dim * 2, time_dim, groups, up=True)
-        self.up_conv2 = ResBlock(conv_dim * 4, conv_dim, time_dim, groups, up=True)
+        self.bottleneck = ResBlock(in_dim, in_dim * 2, time_dim, groups)
+        in_dim *= 2
 
-        self.out_conv = ResBlock(conv_dim * 2, conv_dim * 2, time_dim, groups)
-        self.to_pix = nn.Conv2d(conv_dim * 2, img_dim, 3, padding=1, bias=True)
+        self.up_convs = nn.ModuleList([ResBlock(in_dim, in_dim // 2, time_dim, groups, up=True)])
+        in_dim //= 2
+
+        for _ in range(down_convs - 1):
+            self.up_convs.append(ResBlock(in_dim * 2, in_dim // 2, time_dim, groups, up=True))
+            in_dim //= 2
+        self.up_convs.append(ResBlock(in_dim * 2, in_dim // 2, time_dim, groups))
+
+        self.to_pix = nn.Conv2d(conv_dim, img_dim, 3, padding=1)
 
         self.time_emb = nn.Sequential(
             PosEnc(max_time, time_dim, cycle_frac),
@@ -185,14 +195,21 @@ class UNet(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor):
         time_emb = self.time_emb(t)
-        res1, down1 = self.down_conv1(x, time_emb)
-        res2, down2 = self.down_conv2(down1, time_emb)
-        _, z = self.bottleneck(down2, time_emb)
-        _, up2 = self.up_conv1(z, time_emb)
-        _, up1 = self.up_conv2(torch.cat((up2, res2), dim=1), time_emb)
-        _, pre_out = self.out_conv(torch.cat((up1, res1), dim=1), time_emb)
-        out = self.to_pix(pre_out)
-        return out
+        x = self.init_conv(x)
+
+        down_res = []
+        for conv in self.down_convs:
+            res, x = conv(x, time_emb)
+            down_res.append(res)
+
+        _, x = self.bottleneck(x, time_emb)
+
+        _, x = self.up_convs[0](x, time_emb)
+        for (conv, res) in zip(self.up_convs[1:], reversed(down_res)):
+            _, x = conv(torch.cat((x, res), dim=1), time_emb)
+
+        x = self.to_pix(x)
+        return x
     
 
 @torch.no_grad()
@@ -238,6 +255,7 @@ class CLIParams:
 class Config(CLIParams):
     conv_dim: int = 32
     time_dim: int = 32
+    down_blocks: int = 3
     groups: int = 4
     cycle_frac: float = 0.25
 
@@ -260,7 +278,7 @@ if __name__ == "__main__":
     dataset = get_dataset(config.dataset, config.image_size)
     dataloader = inf_dataloader(DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True))
 
-    model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.groups, config.cycle_frac)
+    model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
     print(summary(model, input_data=(dataset[0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
 
     model.to("cuda").compile()
