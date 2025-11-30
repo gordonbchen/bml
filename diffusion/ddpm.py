@@ -314,7 +314,7 @@ if __name__ == "__main__":
 
         pred_noise = model(xb_noised, t)
 
-        loss = ((noise - pred_noise) ** 2).mean()
+        loss = F.smooth_l1_loss(noise, pred_noise)
         optim.zero_grad()
         loss.backward()
         optim.step()
