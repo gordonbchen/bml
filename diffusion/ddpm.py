@@ -28,25 +28,49 @@ def get_mnist() -> torch.Tensor:
     return images
 
 
-def calc_cos_schedule(t: torch.Tensor, T: int, s: float = 0.008) -> torch.Tensor:
-    phase = ((t / T) + s) / (1 + s)
-    return torch.cos(phase * (torch.pi / 2.0)) ** 2.0
+class NoiseSchedule(nn.Module):
+    def __init__(self, max_time: int):
+        super().__init__()
+        self.max_time = max_time
+
+    def add_noise(self, x: torch.Tensor, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        alpha_bar = rearrange(self.alpha_bar[t], "b -> b 1 1 1")
+        noise = (1 - alpha_bar).sqrt() * torch.randn_like(x)
+        return noise, (alpha_bar.sqrt() * x) + noise
 
 
-def calc_alpha_bar(t: torch.Tensor, T: int) -> torch.Tensor:
-    return calc_cos_schedule(t, T) / calc_cos_schedule(torch.tensor(0.0, device=t.device), T)
+class CosNoiseSchedule(NoiseSchedule):
+    def __init__(self, max_time: int, s: float = 0.008, alpha_clip: float = 1e-4):
+        super().__init__(max_time)
+        t = torch.arange(-1, max_time + 1, dtype=torch.float32)
+        phase = ((t / max_time) + s) / (1 + s)
+        cos2 = torch.cos(phase * (torch.pi / 2.0)) ** 2.0
+        alpha_bar = cos2 / cos2[0]
+
+        alpha = (alpha_bar[1:] / alpha_bar[:-1]).clip(alpha_clip, 1 - alpha_clip)
+        beta = 1 - alpha
+        alpha_bar = alpha_bar[1:]
+        self.register_buffer("alpha", alpha)
+        self.register_buffer("beta", beta)
+        self.register_buffer("alpha_bar", alpha_bar)
 
 
-def calc_alpha(alpha_bar: torch.Tensor) -> torch.Tensor:
-    alpha = alpha_bar[1:] / alpha_bar[:-1]
-    return alpha.clip(1e-4, 1 - 1e-4)
+class LinearNoiseSchedule(NoiseSchedule):
+    def __init__(self, max_time: int, beta_min: float = 1e-4, beta_max: float = 0.02):
+        super().__init__(max_time)
+        scale = 1000 / max_time
+        beta = torch.linspace(scale * beta_min, scale * beta_max, max_time + 1, dtype=torch.float32)
+        alpha = 1 - beta
+        alpha_bar = torch.cumprod(alpha, dim=0)
+        self.register_buffer("alpha", alpha)
+        self.register_buffer("beta", beta)
+        self.register_buffer("alpha_bar", alpha_bar)
 
 
-def add_noise(xs: torch.Tensor, t: torch.Tensor, T: int) -> tuple[torch.Tensor, torch.Tensor]:
-    alpha_bar = calc_alpha_bar(t, T)
-    alpha_bar = rearrange(alpha_bar, "b -> b 1 1 1")
-    noise = (1 - alpha_bar).sqrt() * torch.randn_like(xs)
-    return noise, (alpha_bar.sqrt() * xs) + noise
+NOISE_SCHEDULES = {
+    "cos": CosNoiseSchedule,
+    "linear": LinearNoiseSchedule,
+}
 
 
 class PosEnc(nn.Module):
@@ -150,25 +174,19 @@ class UNet(nn.Module):
     
 
 @torch.no_grad()
-def sample_diffusion(model: nn.Module, batch_size: int, image_shape: tuple[int, int, int], max_time: int) -> torch.Tensor:
+def sample_diffusion(model: nn.Module, noise_schedule: NoiseSchedule, batch_size: int, image_shape: tuple[int, int, int]) -> torch.Tensor:
     model.eval()
     batched_shape = (batch_size, *image_shape)
     device = next(model.parameters()).device
     x = torch.randn(batched_shape, dtype=torch.float32, device=device)
 
-    times = torch.arange(max_time + 1, device=device)
-    alpha_bar = calc_alpha_bar(times, max_time)
-    alpha = calc_alpha(alpha_bar)
-
-    for t in range(max_time, 0, -1):
-        time = times[t].expand(batch_size)
-        pred_noise = ((1 - alpha[t-1]) / (1 - alpha_bar[t]).sqrt()) * model(x, time)
-        x = (x - pred_noise) / alpha[t-1].sqrt()
+    for t in range(noise_schedule.max_time, 0, -1):
+        time = torch.tensor([t], dtype=torch.int64, device=device).expand(batch_size)
+        pred_noise = ((1 - noise_schedule.alpha[t]) / (1 - noise_schedule.alpha_bar[t]).sqrt()) * model(x, time)
+        x = (x - pred_noise) / noise_schedule.alpha[t].sqrt()
 
         if t > 1:
-            noise_scale = (1 - alpha[t-1]) * (1 - alpha_bar[t-1]) / (1 - alpha_bar[t])
-            # noise_scale = 1 - alpha[t-1]
-            noise = torch.randn(batched_shape, dtype=torch.float32, device=device) * noise_scale.sqrt()
+            noise = torch.randn(batched_shape, dtype=torch.float32, device=device) * noise_schedule.beta[t].sqrt()
             x = x + noise
     model.train()
     return x
@@ -202,8 +220,10 @@ class Config(CLIParams):
     conv_dim: int = 32
     time_dim: int = 32
     groups: int = 4
-    max_time: int = 128
     cycle_frac: float = 0.25
+
+    max_time: int = 128
+    noise_schedule: str = "cos"
 
     # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
     lr: float = 3e-4
@@ -226,12 +246,15 @@ if __name__ == "__main__":
     model.to("cuda").compile()
     images = images.to("cuda")
 
+    noise_schedule = NOISE_SCHEDULES[config.noise_schedule](max_time=config.max_time)
+    noise_schedule.to("cuda")
+
     run = wandb.init(project="ddpm", config=asdict(config), name=(None if config.name == "" else config.name))
     for step in range(config.n_steps):
         xb = images[torch.randint(len(images), (config.batch_size,), device="cuda")]
 
         t = torch.randint(1, config.max_time + 1, (config.batch_size,), device="cuda")
-        noise, xb_noised = add_noise(xb, t, config.max_time)
+        noise, xb_noised = noise_schedule.add_noise(xb, t)
 
         pred_noise = model(xb_noised, t)
 
@@ -245,7 +268,7 @@ if __name__ == "__main__":
             run.log({"loss": loss.item()}, step=step)
             
             if (step % 1000) == 0:
-                samples = sample_diffusion(model, batch_size=16, image_shape=xb[0].shape, max_time=config.max_time).cpu()
+                samples = sample_diffusion(model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
 
                 counts, bins = samples.histogram(bins=50)
                 plt.plot((bins[1:] + bins[:-1]) / 2, counts)
