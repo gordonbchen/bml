@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.optim import Adam
+from torch.utils.data import Dataset, DataLoader
 from torchvision.datasets import MNIST
 
 from einops import rearrange
@@ -19,13 +20,25 @@ import wandb
 torch.set_float32_matmul_precision("high")
 
 
-def get_mnist() -> torch.Tensor:
-    ds = MNIST(root="data", train=True, download=True)
-    images = ds.data.to(dtype=torch.float32)
-    images = (images / (255 / 2)) - 1
-    assert (images.min() == -1) and (images.max() == 1)
-    images = images.unsqueeze(-3)
-    return images
+class MNISTDataset(Dataset):
+    def __init__(self):
+        ds = MNIST(root="data", train=True, download=True)
+        images = ds.data.to(dtype=torch.float32)
+        images = (images / (255 / 2)) - 1
+        assert (images.min() == -1) and (images.max() == 1)
+        self.images = images.unsqueeze(1)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self.images[idx]
+    
+    def __len__(self) -> int:
+        return len(self.images)
+    
+
+def inf_dataloader(dataloader: DataLoader):
+    while True:
+        for xb in dataloader:
+            yield xb
 
 
 class NoiseSchedule(nn.Module):
@@ -237,21 +250,21 @@ class Config(CLIParams):
 if __name__ == "__main__":
     config = Config()
 
-    images = get_mnist()
+    dataset = MNISTDataset()
+    dataloader = inf_dataloader(DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True))
 
-    model = UNet(images.shape[1], config.conv_dim, config.max_time, config.time_dim, config.groups, config.cycle_frac)
-    print(summary(model, input_data=(images[:config.batch_size], torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
-    optim = Adam(model.parameters(), lr=config.lr)
+    model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.groups, config.cycle_frac)
+    print(summary(model, input_data=(dataset[0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1))
 
     model.to("cuda").compile()
-    images = images.to("cuda")
+    optim = Adam(model.parameters(), lr=config.lr)
 
     noise_schedule = NOISE_SCHEDULES[config.noise_schedule](max_time=config.max_time)
     noise_schedule.to("cuda")
 
     run = wandb.init(project="ddpm", config=asdict(config), name=(None if config.name == "" else config.name))
     for step in range(config.n_steps):
-        xb = images[torch.randint(len(images), (config.batch_size,), device="cuda")]
+        xb = next(dataloader).to("cuda")
 
         t = torch.randint(1, config.max_time + 1, (config.batch_size,), device="cuda")
         noise, xb_noised = noise_schedule.add_noise(xb, t)
