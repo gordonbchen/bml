@@ -41,8 +41,9 @@ class NoiseSchedule(nn.Module):
 
     def add_noise(self, x: torch.Tensor, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         alpha_bar = rearrange(self.alpha_bar[t], "b -> b 1 1 1")
-        noise = (1 - alpha_bar).sqrt() * torch.randn_like(x)
-        return noise, (alpha_bar.sqrt() * x) + noise
+        eps = torch.randn_like(x)
+        x_t = (alpha_bar.sqrt() * x) + ((1 - alpha_bar).sqrt() * eps)
+        return eps, x_t
 
 
 class CosNoiseSchedule(NoiseSchedule):
