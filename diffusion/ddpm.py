@@ -1,6 +1,7 @@
-from copy import deepcopy
 from argparse import ArgumentParser
+from copy import deepcopy
 from dataclasses import dataclass, asdict
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -16,39 +17,21 @@ from torchinfo import summary
 
 import matplotlib.pyplot as plt
 import wandb
+from tqdm import tqdm
 
 
 torch.set_float32_matmul_precision("high")
 
 
-class ImagesOnly:
-    def __init__(self, dataset: Dataset):
-        self.dataset = dataset
-    
-    def __len__(self) -> int:
-        return len(self.dataset)
-    
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        img, _ = self.dataset[idx]
-        return img
-
-
 def get_dataset(name: str, image_size: int) -> Dataset:
-    DATASETS = {"mnist": (MNIST, {}), "pets": (OxfordIIITPet, {"target_types": "binary-category"})}
-    klass, kwargs = DATASETS[name]
     transform = v2.Compose([
         v2.ToImage(),
         v2.Resize((image_size, image_size)),
         v2.ToDtype(torch.float32, scale=True),
         lambda x: (x * 2) - 1,  # [0, 1] to [-1, 1].
     ])
-    return ImagesOnly(klass(root="data", transform=transform, download=True, **kwargs))
-
-
-def inf_dataloader(dataloader: DataLoader):
-    while True:
-        for xb in dataloader:
-            yield xb
+    DATASETS = {"mnist": MNIST, "pets": partial(OxfordIIITPet, target_types="binary-category")}
+    return DATASETS[name](root="data", transform=transform, download=True)
 
 
 class NoiseSchedule(nn.Module):
@@ -115,10 +98,23 @@ class PosEnc(nn.Module):
         return self.pos_enc[t - 1]
 
 
+class WSConv2d(nn.Conv2d):
+    """
+    Weight-Standardized Conv.
+    https://github.com/google-research/big_transfer/blob/140de6e704fd8d61f3e5ea20ffde130b7d5fd065/bit_pytorch/models.py#L25
+    """
+    def forward(self, x):
+        w = self.weight  # (C_out, C_in, H, W).
+        var, mean = torch.var_mean(w, dim=(1, 2, 3), unbiased=False, keepdim=True)
+        w = (w - mean) / (var + 1e-10).sqrt()
+        x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+
 class ConvBlock(nn.Module):
     def __init__(self, dim_in: int, dim_out: int, groups: int):
         super().__init__()
         # TODO: weight standardized conv2d?
+        # self.conv = WSConv2d(dim_in, dim_out, 3, padding=1, bias=False)
         self.conv = nn.Conv2d(dim_in, dim_out, 3, padding=1, bias=False)
         self.norm = nn.GroupNorm(groups, dim_out)
 
@@ -238,10 +234,13 @@ class EMAModel:
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.decay = decay
+        self.step = 0
 
     @torch.no_grad()
-    def update(self, model: nn.Module, step: int):
-        decay = min(self.decay, 1 - (1 / (step + 1)))
+    def update(self, model: nn.Module):
+        decay = min(self.decay, 1 - (1 / (self.step + 1)))
+        self.step += 1
+
         msd = model.state_dict()
         for k, v in self.model.state_dict().items():
             v.mul_(decay).add_(msd[k], alpha=1 - decay)
@@ -284,8 +283,7 @@ class Config(CLIParams):
 
     lr: float = 3e-4  # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
     batch_size: int = 128
-    n_steps: int = 16_001
-    log_steps: int = 1_000
+    n_epochs: int = 100
 
     name: str = ""
 
@@ -294,42 +292,37 @@ if __name__ == "__main__":
     config = Config().cli_override()
 
     dataset = get_dataset(config.dataset, config.image_size)
-    dataloader = inf_dataloader(DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True))
+    dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True)
 
-    model = UNet(dataset[0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
-    summary(model, input_data=(dataset[0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
+    model = UNet(dataset[0][0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
+    summary(model, input_data=(dataset[0][0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
+    model.to("cuda").compile()
 
-    model.to("cuda").train().compile()
     ema_model = EMAModel(model, decay=config.ema_decay)
     optim = Adam(model.parameters(), lr=config.lr)
-
-    noise_schedule = NOISE_SCHEDULES[config.noise_schedule](max_time=config.max_time)
-    noise_schedule.to("cuda")
+    noise_schedule = NOISE_SCHEDULES[config.noise_schedule](max_time=config.max_time).to("cuda")
 
     run = wandb.init(project="ddpm", config=asdict(config), name=(None if config.name == "" else config.name))
-    for step in range(config.n_steps):
-        xb = next(dataloader).to("cuda")
+    for epoch in range(config.n_epochs):
+        for xb, _ in tqdm(dataloader):
+            t = torch.randint(1, config.max_time + 1, (config.batch_size,), device="cuda")
+            noise, xb_noised = noise_schedule.add_noise(xb.to("cuda"), t)
+            pred_noise = model(xb_noised, t)
 
-        t = torch.randint(1, config.max_time + 1, (config.batch_size,), device="cuda")
-        noise, xb_noised = noise_schedule.add_noise(xb, t)
+            loss = F.smooth_l1_loss(noise, pred_noise)
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+            ema_model.update(model)
 
-        pred_noise = model(xb_noised, t)
+        # Log.
+        print(f"{epoch}: {loss.item()}")
+        samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
 
-        loss = F.smooth_l1_loss(noise, pred_noise)
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
+        counts, bins = samples.histogram(bins=50)
+        plt.plot((bins[1:] + bins[:-1]) / 2, counts)
 
-        ema_model.update(model, step)
-
-        if (step % config.log_steps) == 0:
-            print(f"{str(step):<5}: {loss.item()}")
-            samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
-
-            counts, bins = samples.histogram(bins=50)
-            plt.plot((bins[1:] + bins[:-1]) / 2, counts)
-
-            samples = rearrange(samples , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
-            samples = ((samples.clip(-1, 1) + 1) * (255 / 2)).to(dtype=torch.uint8)
-            run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_hist": plt}, step=step)
+        samples = rearrange(samples , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
+        samples = ((samples.clip(-1, 1) + 1) * (255 / 2)).to(dtype=torch.uint8)
+        run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_hist": plt}, step=epoch)
     run.finish()
