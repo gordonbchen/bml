@@ -310,19 +310,16 @@ if __name__ == "__main__":
             noise, xb_noised = noise_schedule.add_noise(xb.to("cuda"), t)
             pred_noise = model(xb_noised, t)
 
-            loss = F.smooth_l1_loss(noise, pred_noise)
+            loss = F.smooth_l1_loss(noise, pred_noise)  # TODO: test vs l1, l2.
             optim.zero_grad()
             loss.backward()
             optim.step()
             ema_model.update(model)
 
-        # Log.
         print(f"{epoch}: {loss.item()}")
         samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
-
         counts, bins = samples.histogram(bins=50)
         plt.plot((bins[1:] + bins[:-1]) / 2, counts)
-
         samples = rearrange(samples , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
         samples = ((samples.clip(-1, 1) + 1) * (255 / 2)).to(dtype=torch.uint8)
         run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_hist": plt}, step=epoch)
