@@ -212,11 +212,16 @@ class UNet(nn.Module):
     
 
 @torch.no_grad()
-def sample_diffusion(model: nn.Module, noise_schedule: NoiseSchedule, batch_size: int, image_shape: tuple[int, int, int]) -> torch.Tensor:
+def sample_diffusion(
+    model: nn.Module, noise_schedule: NoiseSchedule, batch_size: int,
+    image_shape: tuple[int, int, int], return_steps: list[int] | None = None
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
     batched_shape = (batch_size, *image_shape)
     device = next(model.parameters()).device
     x = torch.randn(batched_shape, dtype=torch.float32, device=device)
 
+    if return_steps is None: return_steps = []
+    xs = [x] if noise_schedule.max_time in return_steps else []
     for t in range(noise_schedule.max_time, 0, -1):
         time = torch.tensor([t], dtype=torch.int64, device=device).expand(batch_size)
         pred_noise = ((1 - noise_schedule.alpha[t]) / (1 - noise_schedule.alpha_bar[t]).sqrt()) * model(x, time)
@@ -225,7 +230,14 @@ def sample_diffusion(model: nn.Module, noise_schedule: NoiseSchedule, batch_size
         if t > 1:
             noise = torch.randn(batched_shape, dtype=torch.float32, device=device) * noise_schedule.beta[t].sqrt()
             x = x + noise
-    return x
+        if (t - 1) in return_steps:
+            xs.append(x)
+    return x, xs
+
+
+def to_image(x: torch.Tensor) -> torch.Tensor:
+    x = (x.clip(-1, 1) + 1) * (255 / 2)
+    return x.to(dtype=torch.uint8)
 
 
 class EMAModel:
@@ -296,7 +308,7 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True)
 
     model = UNet(dataset[0][0].shape[0], config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
-    summary(model, input_data=(dataset[0][0].unsqueeze(0).repeat(config.batch_size, 1, 1, 1), torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
+    summary(model, input_data=(dataset[0][0].expand(config.batch_size, *dataset[0][0].shape), torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
     model.to("cuda").compile()
 
     ema_model = EMAModel(model, decay=config.ema_decay)
@@ -317,10 +329,16 @@ if __name__ == "__main__":
             ema_model.update(model)
 
         print(f"{epoch}: {loss.item()}")
-        samples = sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape).cpu()
+        samples, sample_steps = sample_diffusion(
+            ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape,
+            return_steps=torch.linspace(0, noise_schedule.max_time, steps=32, dtype=torch.int32)
+        )
+        samples, sample_steps = samples.cpu(), torch.stack(sample_steps, dim=0).cpu()
         counts, bins = samples.histogram(bins=50)
         plt.plot((bins[1:] + bins[:-1]) / 2, counts)
-        samples = rearrange(samples , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
-        samples = ((samples.clip(-1, 1) + 1) * (255 / 2)).to(dtype=torch.uint8)
-        run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_hist": plt}, step=epoch)
+        samples = rearrange(to_image(samples) , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
+        sample_steps = rearrange(to_image(sample_steps) , "n (row col) c h w -> n c (row h) (col w)", row=4, col=4)
+        if sample_steps.shape[1] == 1: sample_steps = sample_steps.expand(sample_steps.shape[0], 3, *sample_steps.shape[2:])
+        video = wandb.Video(sample_steps.numpy(), format="gif", fps=8)
+        run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_steps": video, "sample_hist": plt}, step=epoch)
     run.finish()
