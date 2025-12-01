@@ -269,8 +269,8 @@ class CLIParams:
 
 @dataclass
 class Config(CLIParams):
-    conv_dim: int = 32
-    time_dim: int = 32
+    conv_dim: int = 16
+    time_dim: int = 16
     down_blocks: int = 3
     groups: int = 4
     cycle_frac: float = 0.25
@@ -284,7 +284,7 @@ class Config(CLIParams):
 
     lr: float = 3e-4  # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
     batch_size: int = 128
-    n_epochs: int = 100
+    n_epochs: int = 32
 
     name: str = ""
 
