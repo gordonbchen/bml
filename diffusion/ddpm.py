@@ -341,4 +341,7 @@ if __name__ == "__main__":
         if sample_steps.shape[1] == 1: sample_steps = sample_steps.expand(sample_steps.shape[0], 3, *sample_steps.shape[2:])
         video = wandb.Video(sample_steps.numpy(), format="gif", fps=8)
         run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_steps": video, "sample_hist": plt}, step=epoch)
+
+        torch.save(model.state_dict(), run.dir + f"/model.pt")
+        torch.save(ema_model.model.state_dict(), run.dir + f"/ema_model.pt")
     run.finish()
