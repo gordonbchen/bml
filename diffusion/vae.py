@@ -124,6 +124,9 @@ if __name__ == "__main__":
     optim = Adam(vae.parameters(), lr=config.lr)
 
     run = wandb.init(project="vae", config=asdict(config), name=(None if config.name == "" else config.name))
+    cli_args = config.to_cli_args()
+    with open(run.dir + "/cli_args.txt", "w") as f:
+        f.write(" ".join(cli_args))
     for epoch in range(config.epochs):
         for xb, _ in tqdm(dataloader):
             xb = xb.to("cuda")
@@ -141,5 +144,5 @@ if __name__ == "__main__":
         recon_images = ddpm.to_image(rearrange(recon_images, "n b c h w -> c (n h) (b w)"))
         run.log({"loss": loss.item(), "recon_loss": recon_loss.item(), "kl": kl.item(), "recons": wandb.Image(recon_images)}, step=epoch)
         print(f"{epoch:6d}: loss={loss.item():.4f}   recon_loss={recon_loss.item():.4f}   kl={kl.item():.4f}")
-        torch.save(vae.state_dict(), run.dir + f"/model.pt")
+        torch.save(vae.state_dict(), run.dir + "/model.pt")
     run.finish()
