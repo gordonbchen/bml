@@ -38,7 +38,7 @@ def downsample(dim_in : int, dim_out: int) -> nn.Module:
 
 def upsample(dim_in : int, dim_out: int) -> nn.Module:
     return nn.Sequential(
-        nn.Upsample(scale_factor=2),
+        nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
         nn.Conv2d(dim_in, dim_out, 1)
     )
 
@@ -50,7 +50,7 @@ class Encoder(nn.Module):
         self.convs = nn.ModuleList()
         dim = conv_dim
         for _ in range(down_convs):
-            self.convs.append(nn.Sequential(conv_block(dim, dim * 2, groups), downsample(dim*2, dim*2)))
+            self.convs.append(nn.Sequential(conv_block(dim, dim * 2, groups), conv_block(dim * 2, dim * 2, groups), downsample(dim*2, dim*2)))
             dim *= 2
         self.convs.append(conv_block(dim, dim, groups))
         self.mean_head = nn.Conv2d(dim, latent_dim, 3, padding=1)
@@ -76,7 +76,7 @@ class Decoder(nn.Module):
         dim = conv_dim * (2 ** down_convs)
         self.convs = nn.ModuleList([conv_block(latent_dim, dim, groups)])
         for _ in range(down_convs):
-            self.convs.append(nn.Sequential(conv_block(dim, dim, groups), upsample(dim, dim//2)))
+            self.convs.append(nn.Sequential(conv_block(dim, dim * 2, groups), upsample(dim * 2, dim//2)))
             dim //= 2
         self.out_conv = nn.Sequential(
             conv_block(conv_dim, conv_dim, groups),
@@ -101,13 +101,27 @@ class VAE(nn.Module):
         x_recon = self.dec(z)
         return x_recon, means, log_vars, stds 
     
-    def calc_loss(self, x: torch.Tensor, kl_beta: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        x_recon, means, log_vars, stds = self(x)
-        recon_loss = F.mse_loss(x_recon, x)
-        kl = 0.5 * ((means ** 2) + (stds ** 2) - log_vars - 1).sum(dim=1).mean()
-        loss = recon_loss + kl_beta * kl
-        return loss, recon_loss, kl, x_recon
-    
+
+class PatchDiscriminator(nn.Module):
+    def __init__(self, img_dim: int, conv_dim: int, groups: int, down_convs: int, patch_size: int):
+        super().__init__()
+        self.patch_size = patch_size
+        self.in_conv = nn.Sequential(nn.Conv2d(img_dim, conv_dim, 3, padding=1), nn.GELU())
+        self.convs = nn.ModuleList()
+        dim = conv_dim
+        for _ in range(down_convs):
+            self.convs.append(nn.Sequential(conv_block(dim, dim * 2, groups), conv_block(dim * 2, dim * 2, groups), downsample(dim*2, dim*2)))
+            dim *= 2
+        self.convs.append(conv_block(dim, dim, groups))
+        self.out = nn.Sequential(nn.Flatten(), nn.LazyLinear(16), nn.GELU(), nn.Linear(16, 1))
+
+    def forward(self, x: torch.Tensor):
+        x = rearrange(x, "b c (h p1) (w p2) -> (b h w) c p1 p2", p1=self.patch_size, p2=self.patch_size)
+        x = self.in_conv(x)
+        for conv in self.convs:
+            x = conv(x)
+        return self.out(x)
+
 
 @dataclass
 class LDMConfig(CLIParams):
@@ -116,13 +130,13 @@ class LDMConfig(CLIParams):
     
     dataset: str = "mnist"
     image_size: int = 32
+    batch_size: int = 128
 
     # VAE.
     # TODO: nested CLIParams?
     vae_path: str = ""
 
     vae_epochs: int = 16
-    vae_batch_size: int = 128
     vae_kl_beta: float = 0.1
     vae_lr: float = 3e-4
 
@@ -130,6 +144,10 @@ class LDMConfig(CLIParams):
     vae_groups: int = 8
     vae_down_convs: int = 2
     vae_latent_dim: int = 8
+
+    vae_adversarial_loss_weight: float = 0.1
+    vae_discriminator_patch_size: int = 8
+    vae_discriminator_lr: float = 3e-4
 
     # DDPM.
     conv_dim: int = 16
@@ -143,24 +161,38 @@ class LDMConfig(CLIParams):
     noise_schedule: str = "cos"
 
     lr: float = 3e-4  # TODO: lr scheduling? https://www.desmos.com/calculator/1pi7ttmhhb
-    batch_size: int = 128
     epochs: int = 32
 
 
-def train_vae(vae: VAE, config: LDMConfig, dataloader: DataLoader, run: wandb.Run):
+def train_vae(vae: VAE, discriminator: PatchDiscriminator, config: LDMConfig, dataloader: DataLoader, run: wandb.Run):
     vae.to("cuda").compile()
-    optim = Adam(vae.parameters(), lr=config.lr)
+    vae_optim = Adam(vae.parameters(), lr=config.vae_lr)
+    discriminator.to("cuda").compile()
+    discriminator_optim = Adam(discriminator.parameters(), lr=config.vae_discriminator_lr)
     for epoch in range(config.vae_epochs):
         for x, _ in tqdm(dataloader):
             x = x.to("cuda")
-            loss, recon_loss, kl, x_recon = vae.calc_loss(x, config.vae_kl_beta)
-            optim.zero_grad(set_to_none=True)
+            x_recon, means, log_vars, stds = vae(x)
+
+            discriminator_out = discriminator(torch.cat((x, x_recon.detach()), dim=0))
+            discriminator_half = discriminator_out[:discriminator_out.shape[0] // 2]
+            discriminator_loss = F.mse_loss(discriminator_out, torch.cat((torch.ones_like(discriminator_half), torch.zeros_like(discriminator_half))))
+            discriminator_optim.zero_grad(set_to_none=True)
+            discriminator_loss.backward()
+            discriminator_optim.step()
+            
+            adversarial_loss = F.mse_loss(discriminator(x_recon), torch.ones_like(discriminator_half))
+            recon_loss = F.mse_loss(x_recon, x)
+            kl = 0.5 * ((means ** 2) + (stds ** 2) - log_vars - 1).sum(dim=(1, 2, 3)).mean()
+            loss = recon_loss + (config.vae_kl_beta * kl) + (config.vae_adversarial_loss_weight * adversarial_loss)
+            vae_optim.zero_grad(set_to_none=True)
             loss.backward()
-            optim.step()
+            vae_optim.step()
         x_recon = x_recon.detach()
         recon_images = torch.stack((x[:10], x_recon[:10]))
         recon_images = rearrange(ddpm.to_image(recon_images), "n b c h w -> c (n h) (b w)").cpu()
-        run.log({"vae/loss": loss.item(), "vae/recon_loss": recon_loss.item(), "vae/kl": kl.item(), "vae/recons": wandb.Image(recon_images), "vae/epoch": epoch})
+        run.log({"vae/loss": loss.item(), "vae/recon_loss": recon_loss.item(), "vae/kl": kl.item(), "vae/adversarial_loss": adversarial_loss.item(),
+                 "vae/recons": wandb.Image(recon_images), "vae/discriminator_loss": discriminator_loss.item(), "vae/epoch": epoch})
         print(f"{epoch}: loss={loss.item()}")
         torch.save(vae.state_dict(), run.dir + "/vae.pt")
 
@@ -177,22 +209,25 @@ if __name__ == "__main__":
     
     dataset = ddpm.get_dataset(config.dataset, config.image_size)
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=2, pin_memory=True)
-
+    dummy_images = dataset[0][0].expand(config.batch_size, *dataset[0][0].shape)
+    img_dim = dataset[0][0].shape[0]
     if config.vae_path == "":
-        vae = VAE(dataset[0][0].shape[0], config.vae_conv_dim, config.vae_groups, config.vae_down_convs, config.vae_latent_dim)
-        summary(vae, input_data=dataset[0][0].expand(config.vae_batch_size, *dataset[0][0].shape), depth=2)
-        train_vae(vae, config, dataloader, run)
+        vae = VAE(img_dim, config.vae_conv_dim, config.vae_groups, config.vae_down_convs, config.vae_latent_dim)
+        summary(vae, input_data=dummy_images, depth=3)
+        discriminator = PatchDiscriminator(img_dim, config.conv_dim // 2, config.groups, 2, config.vae_discriminator_patch_size)
+        summary(discriminator, input_data=dummy_images, depth=2)
+        train_vae(vae, discriminator, config, dataloader, run)
     else:
         vae_config = LDMConfig().from_json_file(Path(config.vae_path).parent / "cli_args.json")
-        vae = VAE(dataset[0][0].shape[0], vae_config.vae_conv_dim, vae_config.vae_groups, vae_config.vae_down_convs, vae_config.vae_latent_dim)
+        vae = VAE(img_dim, vae_config.vae_conv_dim, vae_config.vae_groups, vae_config.vae_down_convs, vae_config.vae_latent_dim)
         vae.load_state_dict(torch.load(config.vae_path))
         vae.to("cuda").requires_grad_(False).eval().compile()
-        summary(vae, input_dim=(dataset[0][0].expand(config.batch_size, *dataset[0][0].shape)), depth=2)
+        summary(vae, input_data=dummy_images, depth=3)
     with torch.no_grad():
-        vae_latent_dummy = vae.enc(dataset[0][0].unsqueeze(0).to("cuda"), sample=False).cpu()
+        vae_latent_dummy = vae.enc(dummy_images.to("cuda"), sample=False).cpu()
 
     model = ddpm.UNet(config.vae_latent_dim, config.conv_dim, config.max_time, config.time_dim, config.down_blocks, config.groups, config.cycle_frac)
-    summary(model, input_data=(vae_latent_dummy.expand(config.batch_size, *vae_latent_dummy.shape[1:]), torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
+    summary(model, input_data=(vae_latent_dummy, torch.ones(config.batch_size, dtype=torch.int64)), depth=1)
     model.to("cuda").compile()
 
     ema_model = ddpm.EMAModel(model, decay=config.ema_decay)
@@ -215,10 +250,8 @@ if __name__ == "__main__":
             ema_model.update(model)
 
         print(f"{epoch}: {loss.item()}")
-        samples, sample_steps = ddpm.sample_diffusion(
-            ema_model.model, noise_schedule, batch_size=16, image_shape=z[0].shape,
-            return_steps=torch.linspace(0, noise_schedule.max_time, steps=32, dtype=torch.int32)
-        )
+        samples, sample_steps = ddpm.sample_diffusion(ema_model.model, noise_schedule, batch_size=16, image_shape=z[0].shape,
+                                                      return_steps=torch.linspace(0, noise_schedule.max_time, steps=32, dtype=torch.int32))
         with torch.no_grad():
             samples = vae.dec(samples)
             sample_steps = vae.dec(rearrange(sample_steps, "t b c h w -> (t b) c h w"))
