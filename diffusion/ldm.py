@@ -222,7 +222,7 @@ if __name__ == "__main__":
         vae = VAE(img_dim, vae_config.vae_conv_dim, vae_config.vae_groups, vae_config.vae_down_convs, vae_config.vae_latent_dim)
         vae.load_state_dict(torch.load(config.vae_path))
         vae.to("cuda").requires_grad_(False).eval().compile()
-        summary(vae, input_data=dummy_images, depth=3)
+        summary(vae, input_data=dummy_images.to("cuda"), depth=3)
     with torch.no_grad():
         vae_latent_dummy = vae.enc(dummy_images.to("cuda"), sample=False).cpu()
 
