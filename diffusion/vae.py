@@ -14,6 +14,7 @@ import wandb
 from tqdm import tqdm
 
 import ddpm
+from cli_params import CLIParams
 
 
 def conv_block(dim_in: int, dim_out: int, groups: int) -> nn.Module:
@@ -98,7 +99,7 @@ class VAE(nn.Module):
 
 
 @dataclass
-class Config(ddpm.CLIParams):
+class Config(CLIParams):
     epochs: int = 16
     batch_size: int = 128
     kl_beta: float = 0.1
