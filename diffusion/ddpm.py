@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from torchvision.datasets import MNIST, OxfordIIITPet
+from torchvision.datasets import MNIST, OxfordIIITPet, CIFAR10
 from torchvision.transforms import v2
 
 from einops import rearrange
@@ -31,7 +31,7 @@ def get_dataset(name: str, image_size: int) -> Dataset:
         v2.ToDtype(torch.float32, scale=True),
         lambda x: (x * 2) - 1,  # [0, 1] to [-1, 1].
     ])
-    DATASETS = {"mnist": MNIST, "pets": partial(OxfordIIITPet, target_types="binary-category")}
+    DATASETS = {"mnist": MNIST, "pets": partial(OxfordIIITPet, target_types="binary-category"), "cifar10": CIFAR10}
     return DATASETS[name](root="data", transform=transform, download=True)
 
 
