@@ -1,4 +1,3 @@
-from argparse import ArgumentParser
 from copy import deepcopy
 from dataclasses import dataclass, asdict
 from functools import partial
@@ -8,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from torchvision.datasets import MNIST, OxfordIIITPet
+from torchvision.datasets import MNIST, OxfordIIITPet, CIFAR10
 from torchvision.transforms import v2
 
 from einops import rearrange
@@ -18,6 +17,8 @@ from torchinfo import summary
 import matplotlib.pyplot as plt
 import wandb
 from tqdm import tqdm
+
+from cli_params import CLIParams
 
 
 torch.set_float32_matmul_precision("high")
@@ -30,7 +31,7 @@ def get_dataset(name: str, image_size: int) -> Dataset:
         v2.ToDtype(torch.float32, scale=True),
         lambda x: (x * 2) - 1,  # [0, 1] to [-1, 1].
     ])
-    DATASETS = {"mnist": MNIST, "pets": partial(OxfordIIITPet, target_types="binary-category")}
+    DATASETS = {"mnist": MNIST, "pets": partial(OxfordIIITPet, target_types="binary-category"), "cifar10": CIFAR10}
     return DATASETS[name](root="data", transform=transform, download=True)
 
 
@@ -215,7 +216,7 @@ class UNet(nn.Module):
 def sample_diffusion(
     model: nn.Module, noise_schedule: NoiseSchedule, batch_size: int,
     image_shape: tuple[int, int, int], return_steps: list[int] | None = None
-) -> tuple[torch.Tensor, list[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     batched_shape = (batch_size, *image_shape)
     device = next(model.parameters()).device
     x = torch.randn(batched_shape, dtype=torch.float32, device=device)
@@ -232,7 +233,7 @@ def sample_diffusion(
             x = x + noise
         if (t - 1) in return_steps:
             xs.append(x)
-    return x, xs
+    return x, (None if len(return_steps) == 0 else torch.stack(xs, dim=0))
 
 
 def to_image(x: torch.Tensor) -> torch.Tensor:
@@ -257,26 +258,6 @@ class EMAModel:
         msd = model.state_dict()
         for k, v in self.model.state_dict().items():
             v.mul_(decay).add_(msd[k], alpha=1 - decay)
-
-
-class CLIParams:
-    def cli_override(self):
-        """Override params from CLI args."""
-        parser = ArgumentParser()
-        for k, v in asdict(self).items():
-            parser.add_argument(f"--{k}", type=type(v), default=v)
-        args = parser.parse_args()
-
-        for k, v in vars(args).items():
-            setattr(self, k, v)
-        return self
-
-    def to_cli_args(self) -> list[str]:
-        """Convert to params to CLI args."""
-        args = []
-        for k, v in asdict(self).items():
-            args.append(f"--{k}={v}")
-        return args
 
 
 @dataclass
@@ -333,7 +314,7 @@ if __name__ == "__main__":
             ema_model.model, noise_schedule, batch_size=16, image_shape=xb[0].shape,
             return_steps=torch.linspace(0, noise_schedule.max_time, steps=32, dtype=torch.int32)
         )
-        samples, sample_steps = samples.cpu(), torch.stack(sample_steps, dim=0).cpu()
+        samples, sample_steps = samples.cpu(), sample_steps.cpu()
         counts, bins = samples.histogram(bins=50)
         plt.plot((bins[1:] + bins[:-1]) / 2, counts)
         samples = rearrange(to_image(samples) , "(row col) c h w -> c (row h) (col w)", row=4, col=4)
@@ -342,6 +323,6 @@ if __name__ == "__main__":
         video = wandb.Video(sample_steps.numpy(), format="gif", fps=8)
         run.log({"loss": loss.item(), "samples": wandb.Image(samples), "sample_steps": video, "sample_hist": plt}, step=epoch)
 
-        torch.save(model.state_dict(), run.dir + f"/model.pt")
-        torch.save(ema_model.model.state_dict(), run.dir + f"/ema_model.pt")
+        torch.save(model.state_dict(), run.dir + "/model.pt")
+        torch.save(ema_model.model.state_dict(), run.dir + "/ema_model.pt")
     run.finish()
